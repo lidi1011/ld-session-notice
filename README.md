@@ -8,7 +8,7 @@
 
 ## 下载和安装
 
-在 [Releases](https://github.com/lidi1011/session-notice/releases/latest) 下载 `SessionNotice_1.0.0_aarch64.dmg`，打开并把 **Notice.app** 拖入 **Applications**，然后启动。
+在 [Releases](https://github.com/lidi1011/ld-session-notice/releases/latest) 下载 `SessionNotice_1.0.0_aarch64.dmg`，打开并把 **Notice.app** 拖入 **Applications**，然后启动。
 
 - 本次发行提供 **Apple Silicon（arm64）** 安装包；Intel 尚未提供。
 - App 使用 Developer ID 签名，已通过 Apple 公证并附票据。
@@ -62,8 +62,8 @@ App 内置安装/卸载能力，不需要 Python。只合并或删除 Notice 自
 需要 macOS、Node.js、pnpm 10、Rust 和 Xcode Command Line Tools。
 
 ```bash
-git clone https://github.com/lidi1011/session-notice.git
-cd session-notice
+git clone https://github.com/lidi1011/ld-session-notice.git
+cd ld-session-notice
 pnpm install --frozen-lockfile
 pnpm build
 cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
@@ -78,4 +78,4 @@ pnpm tauri build --bundles app -- --locked
 
 基于 [Di-devp/codex-notice](https://github.com/Di-devp/codex-notice) 开发，保留原项目 MIT 许可。Claude 浏览器登录态读取方法参考 [ncreasor/claude-usage](https://github.com/ncreasor/claude-usage)，归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-本项目采用 [MIT License](LICENSE)。问题和建议请提交 [Issue](https://github.com/lidi1011/session-notice/issues)，不要附带真实 Cookie、密钥、hook token 或数据库。
+本项目采用 [MIT License](LICENSE)。问题和建议请提交 [Issue](https://github.com/lidi1011/ld-session-notice/issues)，不要附带真实 Cookie、密钥、hook token 或数据库。

@@ -7,12 +7,12 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lidi1011/session-notice.git"
+    "url": "https://github.com/lidi1011/ld-session-notice.git"
   },
   "bugs": {
-    "url": "https://github.com/lidi1011/session-notice/issues"
+    "url": "https://github.com/lidi1011/ld-session-notice/issues"
   },
-  "homepage": "https://github.com/lidi1011/session-notice#readme",
+  "homepage": "https://github.com/lidi1011/ld-session-notice#readme",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc --noEmit && vite build",

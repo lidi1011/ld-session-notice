@@ -9,4 +9,4 @@
 
 不要把证书、私钥、密码、API 凭据、本机数据库、hook token、个人日志或回退副本提交到仓库。不要在 App 公证之后再次运行会覆盖已签名产物的构建命令。
 
-本次 v1.0.0 为 Apple Silicon 发行，保留 `dev.notice.desktop` 应用身份；源码仓库命名为 session-notice，应用名为 Notice。Intel 和其他 Mac 的完整安装链路尚未实测。
+本次 v1.0.0 为 Apple Silicon 发行，保留 `dev.notice.desktop` 应用身份；源码仓库命名为 ld-session-notice，应用名为 Notice。Intel 和其他 Mac 的完整安装链路尚未实测。
