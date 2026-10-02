@@ -1,0 +1,53 @@
+# dependencies
+node_modules/
+
+# frontend build
+dist/
+
+# Tauri / Rust build outputs
+src-tauri/target/
+
+# local runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+hooks/token
+
+# packaged artifacts
+*.dmg
+*.pkg
+*.app
+*.zip
+
+# local caches
+.understand-anything/
+.vite/
+.cache/
+
+# environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# temporary design sources
+docs/*.png
+src-tauri/icons/icon.previous.png
+
+# local verification and release evidence
+.playwright-cli/
+release/
+artifacts/
+src-tauri/gen/
+*.p8
+node_modules

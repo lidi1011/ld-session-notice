@@ -1,0 +1,111 @@
+:root {
+  color-scheme: dark;
+  background: #101214;
+  color: #eef2f0;
+  font-family:
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    "Segoe UI",
+    sans-serif;
+}
+
+html.widget-root {
+  background: transparent;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 980px;
+  min-height: 720px;
+  background:
+    linear-gradient(135deg, rgba(28, 36, 34, 0.92), rgba(12, 14, 16, 0.98)),
+    #101214;
+}
+
+body.widget-body {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body.widget-body #app {
+  width: 232px;
+  height: 76px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.app-shell {
+  height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(12, 15, 16, 0.94);
+}
+
+.brand {
+  padding: 22px 20px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.brand-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 720;
+  letter-spacing: 0;
+}
+
+.brand-subtitle {
+  margin: 6px 0 0;
+  color: #8ca39b;
+  font-size: 12px;
+}
+
+.content {
+  padding: 28px;
+  overflow: auto;
+}
+
+.section-title {
+  margin: 0 0 18px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.panel {
+  margin-bottom: 16px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.code-preview {
+  max-height: 360px;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 8px;
+  background: #080a0b;
+  color: #b9c7c2;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+}

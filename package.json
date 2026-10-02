@@ -1,0 +1,45 @@
+{
+  "name": "session-notice",
+  "version": "1.0.0",
+  "description": "macOS menu bar status and weekly quota for Codex and Claude Code.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lidi1011/session-notice.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lidi1011/session-notice/issues"
+  },
+  "homepage": "https://github.com/lidi1011/session-notice#readme",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "dist:mac": "tauri build --bundles dmg",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-autostart": "~2",
+    "katex": "^0.16.11",
+    "naive-ui": "^2.41.0",
+    "pinia": "^3.0.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^22.10.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "jsdom": "^25.0.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "vitest": "^2.1.0",
+    "vue-tsc": "^2.1.0"
+  },
+  "packageManager": "pnpm@10.0.0"
+}
