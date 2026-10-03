@@ -510,7 +510,7 @@ pub async fn get_claude_usage_status(state: State<'_, AppState>) -> Result<crate
 #[tauri::command]
 pub async fn open_claude_account(app: AppHandle, state: State<'_, AppState>) -> Result<(),String> {
     storage::put_setting(&state.pool,"claude_usage_enabled","true").await.map_err(|e|e.to_string())?;
-    crate::claude_usage::open_account(&app,true)
+    crate::claude_usage::open_account(&app,true).await
 }
 #[tauri::command]
 pub async fn refresh_claude_usage(app: AppHandle) -> Result<crate::claude_usage::UsageStatus,String> { crate::claude_usage::refresh(&app).await }

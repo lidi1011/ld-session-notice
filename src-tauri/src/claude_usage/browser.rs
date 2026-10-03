@@ -1,14 +1,22 @@
 //! Read only claude.ai cookies from the selected browser; never persist credentials.
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqliteConnectOptions, Connection, Row};
 use std::{collections::BTreeMap, path::PathBuf, process::Command};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Source {
+    pub bundle: String,
+    pub profile: Option<String>,
+}
 
 pub struct Browser {
     pub name: &'static str,
     pub bundle: &'static str,
     root: PathBuf,
     service: Option<&'static str>,
+    pub source: Source,
 }
 pub fn selected() -> Result<Browser, String> {
     let home = dirs::home_dir().ok_or("无法找到用户目录")?;
@@ -25,7 +33,23 @@ pub fn selected() -> Result<Browser, String> {
         .and_then(|a| a.iter().find(|h| h["LSHandlerURLScheme"] == "https"))
         .and_then(|h| h["LSHandlerRoleAll"].as_str())
         .unwrap_or("com.apple.Safari");
-    let (name, bundle, path, service) = match bundle.to_ascii_lowercase().as_str() {
+    let mut browser = from_source(&Source {
+        bundle: bundle.into(),
+        profile: None,
+    })?;
+    if browser.service.is_some() {
+        let state: Value = std::fs::read(browser.root.join("Local State"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        browser.source.profile = Some(profile_name(&state));
+    }
+    Ok(browser)
+}
+
+pub fn from_source(source: &Source) -> Result<Browser, String> {
+    let home = dirs::home_dir().ok_or("无法找到用户目录")?;
+    let (name, bundle, path, service) = match source.bundle.to_ascii_lowercase().as_str() {
         "com.google.chrome" => (
             "Chrome",
             "com.google.Chrome",
@@ -52,7 +76,20 @@ pub fn selected() -> Result<Browser, String> {
         ),
         _ => return Err("默认浏览器暂不支持额度读取；支持 Chrome、Arc、Brave、Safari".into()),
     };
+    let profile = if service.is_some() {
+        let name = source.profile.as_deref().unwrap_or("Default");
+        if !valid_profile(name) {
+            return Err("浏览器个人资料标识无效".into());
+        }
+        Some(name.to_string())
+    } else {
+        None
+    };
     Ok(Browser {
+        source: Source {
+            bundle: bundle.into(),
+            profile,
+        },
         name,
         bundle,
         root: home.join(path),
@@ -61,16 +98,19 @@ pub fn selected() -> Result<Browser, String> {
 }
 fn profile_name(state: &Value) -> String {
     let name = state["profile"]["last_used"].as_str().unwrap_or("Default");
-    if name == "Default"
-        || name
-            .strip_prefix("Profile ")
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
-    {
+    if valid_profile(name) {
         name.into()
     } else {
         "Default".into()
     }
 }
+fn valid_profile(name: &str) -> bool {
+    name == "Default"
+        || name
+            .strip_prefix("Profile ")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+}
+
 fn allowed(name: &str) -> bool {
     matches!(
         name,
@@ -81,6 +121,12 @@ fn cookie_domain(domain: &str) -> bool {
     domain == "claude.ai" || domain == ".claude.ai"
 }
 impl Browser {
+    pub fn label(&self) -> String {
+        match &self.source.profile {
+            Some(profile) => format!("{} / {profile}", self.name),
+            None => self.name.into(),
+        }
+    }
     pub fn open(&self) -> Result<(), String> {
         let status = Command::new("/usr/bin/open")
             .args(["-b", self.bundle, "https://claude.ai/settings/usage"])
@@ -98,11 +144,11 @@ impl Browser {
                 .map_err(|_| "无法读取 Safari 登录态，请在系统设置中允许 Notice 完全磁盘访问")?;
             return safari(&bytes).ok_or("Safari Cookie 格式无法读取".into());
         };
-        let state: Value = std::fs::read(self.root.join("Local State"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        let profile = self.root.join(profile_name(&state));
+        // The source is resolved once and persisted after success. Unrelated browser
+        // profile changes must not change the account used by background refreshes.
+        let profile = self
+            .root
+            .join(self.source.profile.as_deref().unwrap_or("Default"));
         let mut path = profile.join("Cookies");
         if !path.exists() {
             path = profile.join("Network/Cookies");
@@ -123,8 +169,11 @@ impl Browser {
                 .unwrap_or(0);
         let rows=sqlx::query("SELECT host_key,name,value,encrypted_value FROM cookies WHERE host_key IN ('claude.ai','.claude.ai') AND name IN ('sessionKey','lastActiveOrg','cf_clearance','__cf_bm') AND (expires_utc=0 OR expires_utc > (strftime('%s','now')+11644473600)*1000000)").fetch_all(&mut db).await.map_err(|_|"浏览器 Cookie 格式无法读取")?;
         if rows.is_empty() {
-            return Err("当前浏览器个人资料没有 Claude 登录态，请先在浏览器登录 Claude".into());
+            return Ok(BTreeMap::new());
         }
+        let has_session = rows
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "sessionKey");
         let key = tauri::async_runtime::spawn_blocking(move || {
             let output = Command::new("/usr/bin/security")
                 .args(["find-generic-password", "-w", "-s", service])
@@ -157,6 +206,9 @@ impl Browser {
             if let Some(value) = value.filter(|v| !v.is_empty() && !v.contains(['\r', '\n', ';'])) {
                 result.insert(name, value);
             }
+        }
+        if has_session && !result.contains_key("sessionKey") {
+            return Err("Claude 登录态解密失败，请检查浏览器安全存储访问权限".into());
         }
         Ok(result)
     }
@@ -310,6 +362,21 @@ mod tests {
         assert!(!cookie_domain("evilclaude.ai"));
         assert!(cookie_domain(".claude.ai"));
         assert!(safari(b"cook\xff\xff\xff\xff").is_none());
+    }
+    #[test]
+    fn saved_profile_does_not_follow_last_used() {
+        let source = Source {
+            bundle: "com.google.Chrome".into(),
+            profile: Some("Profile 1".into()),
+        };
+        let current = serde_json::json!({"profile":{"last_used":"Default"}});
+        assert_eq!(profile_name(&current), "Default");
+        assert_eq!(from_source(&source).unwrap().source, source);
+        let invalid = Source {
+            profile: Some("../Other".into()),
+            ..source
+        };
+        assert!(from_source(&invalid).is_err());
     }
     #[test]
     fn decrypts_domain_bound_cookie() {
