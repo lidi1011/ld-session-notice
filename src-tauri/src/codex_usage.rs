@@ -1,8 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
@@ -13,6 +15,8 @@ const CACHE_TTL: Duration = Duration::from_secs(5);
 const GENERAL_LIMIT_STALE_AFTER: Duration = Duration::from_secs(120);
 
 static CACHE: OnceLock<Mutex<Option<CachedUsage>>> = OnceLock::new();
+static TRANSCRIPT_INDEX: OnceLock<Mutex<HashMap<PathBuf, IndexedTranscript>>> = OnceLock::new();
+static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct CachedUsage {
@@ -20,10 +24,34 @@ struct CachedUsage {
     value: Option<CodexUsageStatus>,
 }
 
+#[derive(Clone)]
+struct IndexedTranscript {
+    len: u64,
+    modified: Option<SystemTime>,
+    offset: u64,
+    candidates: UsageCandidates,
+}
+
+struct ScanGuard;
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        SCAN_RUNNING.store(false, Ordering::Release);
+    }
+}
+
 pub async fn latest() -> Option<CodexUsageStatus> {
     if let Some(value) = cached_value() {
         return value;
     }
+    // A scan can outlive the poll interval. Reuse the last value instead of stacking scans.
+    if SCAN_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return last_cached_value();
+    }
+    let _scan_guard = ScanGuard;
 
     let value = tokio::task::spawn_blocking(scan_latest_usage)
         .await
@@ -45,7 +73,9 @@ pub async fn latest() -> Option<CodexUsageStatus> {
 pub fn invalidate_cache() {
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     if let Ok(mut guard) = cache.lock() {
-        *guard = None;
+        if let Some(cached) = guard.as_mut() {
+            cached.loaded_at = Instant::now() - CACHE_TTL - Duration::from_millis(1);
+        }
     }
 }
 
@@ -57,6 +87,11 @@ fn cached_value() -> Option<Option<CodexUsageStatus>> {
         return Some(cached.value.clone());
     }
     None
+}
+
+fn last_cached_value() -> Option<CodexUsageStatus> {
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    cache.lock().ok()?.as_ref()?.value.clone()
 }
 
 fn scan_latest_usage() -> anyhow::Result<Option<CodexUsageStatus>> {
@@ -75,12 +110,28 @@ fn scan_latest_usage_for_home(home: &Path) -> anyhow::Result<Option<CodexUsageSt
 }
 
 fn scan_transcript_usage(home: &Path) -> anyhow::Result<Option<CodexUsageStatus>> {
+    let index = TRANSCRIPT_INDEX.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut index = index
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Codex usage index is unavailable"))?;
+    scan_transcript_usage_with_index(home, &mut index)
+}
+
+fn scan_transcript_usage_with_index(
+    home: &Path,
+    index: &mut HashMap<PathBuf, IndexedTranscript>,
+) -> anyhow::Result<Option<CodexUsageStatus>> {
+    let mut seen = HashSet::new();
     let mut candidates = UsageCandidates::default();
     for root in [
         home.join(".codex").join("sessions"),
         home.join(".codex").join("archived_sessions"),
     ] {
-        scan_dir(&root, &mut candidates)?;
+        scan_dir(&root, index, &mut seen)?;
+    }
+    index.retain(|path, _| seen.contains(path));
+    for indexed in index.values() {
+        candidates.merge(indexed.candidates.clone());
     }
 
     Ok(candidates.into_latest())
@@ -166,7 +217,7 @@ fn parse_codexmate_active_account_key(content: &str) -> Option<String> {
     cache.snapshot_progressive?.status?.active_account_key
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct UsageCandidates {
     latest_codex: Option<CodexUsageStatus>,
     latest_any: Option<CodexUsageStatus>,
@@ -179,6 +230,15 @@ impl UsageCandidates {
         }
         if status.limit_id == "codex" && is_newer(&status, &self.latest_codex) {
             self.latest_codex = Some(status);
+        }
+    }
+
+    fn merge(&mut self, other: UsageCandidates) {
+        if let Some(status) = other.latest_any {
+            self.record(status);
+        }
+        if let Some(status) = other.latest_codex {
+            self.record(status);
         }
     }
 
@@ -213,7 +273,11 @@ fn is_newer(status: &CodexUsageStatus, current: &Option<CodexUsageStatus>) -> bo
         .unwrap_or(true)
 }
 
-fn scan_dir(path: &Path, candidates: &mut UsageCandidates) -> anyhow::Result<()> {
+fn scan_dir(
+    path: &Path,
+    index: &mut HashMap<PathBuf, IndexedTranscript>,
+    seen: &mut HashSet<PathBuf>,
+) -> anyhow::Result<()> {
     let Ok(entries) = fs::read_dir(path) else {
         return Ok(());
     };
@@ -221,25 +285,62 @@ fn scan_dir(path: &Path, candidates: &mut UsageCandidates) -> anyhow::Result<()>
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            scan_dir(&path, candidates)?;
+            scan_dir(&path, index, seen)?;
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            scan_file(&path, candidates)?;
+            seen.insert(path.clone());
+            scan_file(&path, index)?;
         }
     }
 
     Ok(())
 }
 
-fn scan_file(path: &Path, candidates: &mut UsageCandidates) -> anyhow::Result<()> {
-    let file = File::open(path)?;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+fn scan_file(path: &Path, index: &mut HashMap<PathBuf, IndexedTranscript>) -> anyhow::Result<()> {
+    let metadata = fs::metadata(path)?;
+    let len = metadata.len();
+    let modified = metadata.modified().ok();
+    let mut indexed = match index.get(path) {
+        Some(existing) if existing.len == len && existing.modified == modified => return Ok(()),
+        // Codex transcripts are append-only. Any other change requires a clean reparse.
+        Some(existing) if len >= existing.offset => existing.clone(),
+        _ => IndexedTranscript {
+            len: 0,
+            modified: None,
+            offset: 0,
+            candidates: UsageCandidates::default(),
+        },
+    };
+
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(indexed.offset))?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            // Keep the offset before this record so the next poll rereads it after its newline arrives.
+            if line.contains("\"rate_limits\"") {
+                if let Some(status) = parse_usage_line(&line) {
+                    indexed.candidates.record(status);
+                }
+            }
+            break;
+        }
+        indexed.offset += read as u64;
         if !line.contains("\"rate_limits\"") {
             continue;
         }
-        if let Some(status) = parse_usage_line(&line) {
-            candidates.record(status);
+        if let Some(status) = parse_usage_line(line.trim_end()) {
+            indexed.candidates.record(status);
         }
     }
+    indexed.len = len;
+    indexed.modified = modified;
+    index.insert(path.to_path_buf(), indexed);
     Ok(())
 }
 
@@ -416,11 +517,13 @@ fn timestamp_from_seconds(seconds: i64) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cached_value, invalidate_cache, parse_codexmate_bootstrap_active_usage,
-        parse_codexmate_quota_store, parse_usage_line, scan_latest_usage_for_home, CachedUsage,
-        UsageCandidates, CACHE,
+        cached_value, invalidate_cache, last_cached_value, parse_codexmate_bootstrap_active_usage,
+        parse_codexmate_quota_store, parse_usage_line, scan_latest_usage_for_home,
+        scan_transcript_usage_with_index, CachedUsage, UsageCandidates, CACHE,
     };
+    use std::collections::HashMap;
     use std::fs;
+    use std::io::Write;
     use std::time::Instant;
 
     #[test]
@@ -652,15 +755,54 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_cache_clears_cached_usage() {
+    fn invalidate_cache_expires_but_keeps_last_usage_for_overlapping_polls() {
         let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
         *cache.lock().unwrap() = Some(CachedUsage {
             loaded_at: Instant::now(),
-            value: None,
+            value: parse_usage_line(
+                r#"{"timestamp":"2026-06-16T14:35:03.253Z","payload":{"rate_limits":{"limit_id":"codex"}}}"#,
+            ),
         });
 
         assert!(cached_value().is_some());
         invalidate_cache();
         assert!(cached_value().is_none());
+        assert_eq!(last_cached_value().unwrap().limit_id, "codex");
+    }
+
+    #[test]
+    fn transcript_index_reads_only_complete_appended_lines() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions_dir = home.path().join(".codex").join("sessions").join("2026");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("session.jsonl");
+        fs::write(
+            &path,
+            "{\"timestamp\":\"2026-06-16T14:35:03.253Z\",\"payload\":{\"rate_limits\":{\"limit_id\":\"codex\",\"secondary\":{\"used_percent\":59.0,\"window_minutes\":10080}}}}\n",
+        )
+        .unwrap();
+        let mut index = HashMap::new();
+        let first = scan_transcript_usage_with_index(home.path(), &mut index)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.secondary.unwrap().remaining_percent, 41.0);
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{{\"timestamp\":\"2026-06-16T14:40:03.253Z\",\"payload\":{{\"rate_limits\":{{\"limit_id\":\"codex\",\"secondary\":{{\"used_percent\":20.0,").unwrap();
+        let partial = scan_transcript_usage_with_index(home.path(), &mut index)
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.secondary.unwrap().remaining_percent, 41.0);
+
+        writeln!(file, "\"window_minutes\":10080}}}}}}}}").unwrap();
+        let appended = scan_transcript_usage_with_index(home.path(), &mut index)
+            .unwrap()
+            .unwrap();
+        assert_eq!(appended.secondary.unwrap().remaining_percent, 80.0);
+
+        fs::remove_file(path).unwrap();
+        assert!(scan_transcript_usage_with_index(home.path(), &mut index)
+            .unwrap()
+            .is_none());
     }
 }

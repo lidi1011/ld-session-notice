@@ -680,7 +680,8 @@ onMounted(async () => {
       console.error("Notice widget shadow update failed", error);
     });
     await traffic.load();
-    refreshTimer = window.setInterval(() => traffic.load(), 800);
+    // The animation runs in CSS; backend state only needs a light refresh cadence.
+    refreshTimer = window.setInterval(() => traffic.load(), 2000);
     return;
   }
   await refreshAll();
