@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::{HookPreview, HookStatus};
 
+const CODEX_HOOK_TEMPLATE: &str = include_str!("codex-hook.sh");
+const CODEX_WEBHOOK_URL: &str = "http://127.0.0.1:3746/api/webhook/codex";
 const START_MARKER: &str = "# >>> Notice managed hooks >>>";
 const END_MARKER: &str = "# <<< Notice managed hooks <<<";
 const EVENTS: [&str; 6] = [
@@ -156,40 +158,19 @@ fn write_wrapper_script(data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
     fs::create_dir_all(&dir)?;
     let token_file = dir.join("token");
     let script = dir.join("notice-hook.sh");
-    let body = format!(
-        r#"#!/bin/sh
-TOKEN_FILE={token_file}
-PAYLOAD="$(cat)"
-TIMEOUT=2
-if printf "%s" "$PAYLOAD" | /usr/bin/grep -Eiq 'rm -rf /|sudo rm|diskutil erase|drop table|truncate table'; then
-  TIMEOUT=30
-fi
-if [ ! -f "$TOKEN_FILE" ]; then
-  printf '{{"continue":true,"suppressOutput":true}}\n'
-  exit 0
-fi
-TOKEN="$(cat "$TOKEN_FILE")"
-RESP="$(printf "%s" "$PAYLOAD" | /usr/bin/curl -sS --max-time "$TIMEOUT" \
-  -H "Content-Type: application/json" \
-  -H "X-Notice-Token: $TOKEN" \
-  --data-binary @- \
-  http://127.0.0.1:3746/api/webhook/codex)"
-STATUS=$?
-if [ "$STATUS" -eq 0 ] && [ -n "$RESP" ]; then
-  printf "%s\n" "$RESP"
-elif [ "$TIMEOUT" -eq 30 ]; then
-  printf '{{"continue":false,"stopReason":"Notice unavailable for critical command","suppressOutput":false}}\n'
-else
-  printf '{{"continue":true,"suppressOutput":true}}\n'
-fi
-"#,
-        token_file = shell_escape(&token_file.display().to_string())
-    );
+    let body = render_codex_hook(&token_file.display().to_string());
     fs::write(&script, body)?;
     let mut permissions = fs::metadata(&script)?.permissions();
     permissions.set_mode(0o700);
     fs::set_permissions(&script, permissions)?;
     Ok(script)
+}
+
+fn render_codex_hook(token_file: &str) -> String {
+    CODEX_HOOK_TEMPLATE
+        .replace("__TOKEN_FILE__", &shell_escape(token_file))
+        .replace("__URL__", &shell_escape(CODEX_WEBHOOK_URL))
+        .replace("__LEGACY_SERVER__", "0")
 }
 
 fn hash_notice_block(content: &str) -> String {
@@ -205,7 +186,8 @@ fn shell_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_hooks, hook_command, managed_block_complete, remove_managed_block, START_MARKER,
+        append_hooks, hook_command, managed_block_complete, remove_managed_block,
+        render_codex_hook, START_MARKER,
     };
     use std::path::PathBuf;
 
@@ -244,5 +226,14 @@ mod tests {
             command,
             "/bin/sh '/Users/di/Library/Application Support/Notice/hooks/notice-hook.sh'"
         );
+    }
+
+    #[test]
+    fn codex_hook_fills_every_placeholder() {
+        let script = render_codex_hook("/Users/di/Library/Application Support/Notice/hooks/token");
+        assert!(!script.contains("__"), "unfilled placeholder");
+        assert!(script.contains("TOKEN_FILE='/Users/di/Library/Application Support/Notice/hooks/token'"));
+        assert!(script.contains("LEGACY_SERVER=0"));
+        assert!(!script.contains("\"continue\":true"), "Codex ignores continue on PreToolUse");
     }
 }

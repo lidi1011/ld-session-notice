@@ -7,7 +7,7 @@ mod domain;
 mod hooks;
 mod mochi_voice;
 mod pet;
-mod rules;
+pub mod rules;
 mod secret_store;
 mod server;
 mod storage;

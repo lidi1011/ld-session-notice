@@ -52,6 +52,9 @@ async fn codex_webhook(
         );
     }
 
+    // Decided before handling, so a storage error cannot let a destructive
+    // command through.
+    let critical = is_critical_pre_tool_use(&payload);
     match handle_codex_payload(state.clone(), payload).await {
         Ok((response, should_sync_pet)) => {
             refresh_codex_usage_after_hook();
@@ -60,6 +63,14 @@ async fn codex_webhook(
             }
             (StatusCode::OK, Json(response))
         }
+        Err(error) if critical => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HookResponse {
+                should_continue: false,
+                stop_reason: Some(format!("Notice failed on a destructive command: {error}")),
+                suppress_output: Some(false),
+            }),
+        ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HookResponse {
@@ -69,6 +80,17 @@ async fn codex_webhook(
             }),
         ),
     }
+}
+
+fn is_critical_pre_tool_use(payload: &Value) -> bool {
+    let event_name = payload
+        .get("hook_event_name")
+        .or_else(|| payload.get("hookEventName"))
+        .and_then(Value::as_str);
+    event_name == Some("PreToolUse")
+        && extract_command(payload)
+            .map(|command| classify_command(&command).level == RiskLevel::Critical)
+            .unwrap_or(false)
 }
 
 fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
@@ -105,7 +127,7 @@ async fn handle_codex_payload(
                     project.as_deref(),
                     "critical",
                     &risk.rule,
-                    30,
+                    APPROVAL_TIMEOUT_SECS,
                 )
                 .await?;
                 let event = event_from_payload(
@@ -314,8 +336,12 @@ async fn send_feishu_if_enabled(state: &AppState, event: &NoticeEvent) {
     }
 }
 
+/// Shorter than the hook script's 28 s wait and Codex's 30 s hook timeout, so
+/// a late approval still reaches Codex.
+const APPROVAL_TIMEOUT_SECS: i64 = 25;
+
 async fn wait_for_approval(state: &AppState, id: &str) -> anyhow::Result<HookResponse> {
-    for _ in 0..120 {
+    for _ in 0..APPROVAL_TIMEOUT_SECS * 4 {
         if let Some(status) = storage::approval_status(&state.pool, id).await? {
             match status.as_str() {
                 "approved" => {
@@ -419,8 +445,18 @@ fn extract_command(payload: &Value) -> Option<String> {
                 .and_then(|input| input.get("command"))
         })
         .or_else(|| payload.get("command"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+        .and_then(|command| match command {
+            Value::String(text) => Some(text.clone()),
+            // argv form, e.g. ["bash", "-lc", "rm -rf /"]
+            Value::Array(parts) => Some(
+                parts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => None,
+        })
 }
 
 #[allow(dead_code)]

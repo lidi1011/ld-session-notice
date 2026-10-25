@@ -1,0 +1,42 @@
+# Shared by risk.rs tests and scripts/test_codex_hook.py, so the Rust rule and
+# the shell hook stay in step. Format: critical|safe <TAB> command
+critical	rm -rf /
+critical	rm  -rf /
+critical	rm -fr /
+critical	rm -r -f /
+critical	rm -Rf /
+critical	rm --recursive --force /
+critical	rm -rf -- /
+critical	rm -rf /*
+critical	rm -rf / --no-preserve-root
+critical	/bin/rm -rf /
+critical	rm -rf ~
+critical	rm -rf ~/
+critical	rm -rf $HOME
+critical	rm -rf "$HOME"
+critical	rm -rf ${HOME}/*
+critical	rm -rf "/"
+critical	cd /tmp && rm -fr /
+critical	rm	-rf /
+critical	sudo rm -r /x
+critical	sudo  rm -r /x
+critical	sudo -u root rm file
+critical	SUDO RM file
+critical	find / -delete
+critical	find / -name '*.log' -delete
+critical	find ~ -type f -delete
+critical	rm -rf /tmp/build
+critical	diskutil eraseDisk APFS X disk4
+critical	psql -c 'DROP TABLE users'
+critical	mysql -e "truncate  table logs"
+safe	echo hello
+safe	ls -la /
+safe	rm -rf build
+safe	rm -rf ./node_modules
+safe	rm notes.txt
+safe	rm ~/notes.txt
+safe	git rm --cached file
+safe	find . -name '*.tmp' -delete
+safe	find / -name passwd
+safe	rm -rf build; ls /
+safe	echo delete button label
