@@ -699,6 +699,9 @@ pub async fn recent_delivery_exists(pool: &SqlitePool, dedupe_key: &str) -> anyh
     Ok(count > 0)
 }
 
+// Notice no longer creates approvals (Codex approves its own commands); the
+// table stays for history and the traffic-status tests.
+#[cfg(test)]
 pub async fn create_pending_approval(
     pool: &SqlitePool,
     command: &str,
@@ -764,14 +767,6 @@ pub async fn resolve_approval(pool: &SqlitePool, id: &str, status: &str) -> anyh
         .execute(pool)
         .await?;
     Ok(())
-}
-
-pub async fn approval_status(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<String>> {
-    let status = sqlx::query_scalar("SELECT status FROM pending_approvals WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(status)
 }
 
 fn row_to_event(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<NoticeEvent> {

@@ -1,6 +1,6 @@
 [package]
 name = "notice"
-version = "1.0.2"
+version = "1.0.3"
 description = "Developer Notification Center"
 authors = ["Notice"]
 edition = "2021"

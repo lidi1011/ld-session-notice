@@ -63,8 +63,7 @@ pub fn classify_command(command: &str) -> RiskMatch {
 
 /// Catches spellings the substring checks miss (`rm -fr /`, `rm -r -f ~`,
 /// `sudo -u x rm`, `find / -delete`). Quotes are dropped and `; & | ( )` end a
-/// command segment. The Codex hook script applies the same rule with grep, and
-/// risk_cases.tsv keeps the two in step.
+/// command segment. Cases live in risk_cases.tsv.
 fn has_destructive_segment(collapsed: &str) -> bool {
     let spaced: String = collapsed
         .chars()

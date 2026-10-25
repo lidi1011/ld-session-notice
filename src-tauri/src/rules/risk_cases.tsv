@@ -1,5 +1,5 @@
-# Shared by risk.rs tests and scripts/test_codex_hook.py, so the Rust rule and
-# the shell hook stay in step. Format: critical|safe <TAB> command
+# Cases for risk.rs: which commands Notice records as high-risk.
+# Format: critical|safe <TAB> command
 critical	rm -rf /
 critical	rm  -rf /
 critical	rm -fr /

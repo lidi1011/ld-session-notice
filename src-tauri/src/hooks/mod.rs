@@ -170,7 +170,6 @@ fn render_codex_hook(token_file: &str) -> String {
     CODEX_HOOK_TEMPLATE
         .replace("__TOKEN_FILE__", &shell_escape(token_file))
         .replace("__URL__", &shell_escape(CODEX_WEBHOOK_URL))
-        .replace("__LEGACY_SERVER__", "0")
 }
 
 fn hash_notice_block(content: &str) -> String {
@@ -233,7 +232,7 @@ mod tests {
         let script = render_codex_hook("/Users/di/Library/Application Support/Notice/hooks/token");
         assert!(!script.contains("__"), "unfilled placeholder");
         assert!(script.contains("TOKEN_FILE='/Users/di/Library/Application Support/Notice/hooks/token'"));
-        assert!(script.contains("LEGACY_SERVER=0"));
+        assert!(!script.contains("exit 2"), "Notice never blocks Codex commands");
         assert!(!script.contains("\"continue\":true"), "Codex ignores continue on PreToolUse");
     }
 }

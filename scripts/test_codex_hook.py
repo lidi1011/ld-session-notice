@@ -1,7 +1,9 @@
-"""Must-block tests for the Codex hook script (src-tauri/src/hooks/codex-hook.sh).
+"""Tests for the Codex hook script (src-tauri/src/hooks/codex-hook.sh).
 
-Runs the real script with /bin/sh against a fake Notice server on a free port,
-with a temporary token. No real Notice, token or Codex is touched.
+Notice only records Codex activity; approving commands is left to Codex. So
+the hook must forward every event and never block, print or stall Codex,
+whatever state Notice is in. Runs the real script with /bin/sh against a fake
+Notice server on a free port, with a temporary token.
 
     python3 scripts/test_codex_hook.py
 """
@@ -18,35 +20,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "src-tauri/src/hooks/codex-hook.sh"
-CASES = ROOT / "src-tauri/src/rules/risk_cases.tsv"
-OLD_RULE = ("rm -rf /", "sudo rm", "diskutil erase", "drop table", "truncate table")
+COMMANDS = ("rm -rf /", "rm -fr /", "sudo  rm -r /x", "echo hi")
+EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop")
 
 ANSWERS = {
     "/allow": (200, {"continue": True, "suppressOutput": True}),
     "/deny": (200, {"continue": False, "stopReason": "Rejected in Notice"}),
-    "/failopen": (200, {"continue": True, "stopReason": "Notice failed open: db"}),
     "/unauthorized": (401, {"continue": False, "stopReason": "Notice token rejected"}),
     "/error": (500, {"continue": True}),
 }
 
 
-def load_cases():
-    cases = []
-    for line in CASES.read_text().splitlines():
-        if line and not line.startswith("#"):
-            expected, command = line.split("\t", 1)
-            cases.append((expected == "critical", command))
-    return cases
-
-
 class FakeNotice(BaseHTTPRequestHandler):
+    received = []
+
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        FakeNotice.received.append((self.headers.get("X-Notice-Token"), json.loads(body)))
         if self.path == "/slow":
-            time.sleep(31)
+            time.sleep(10)
             return
-        code, body = ANSWERS[self.path]
-        data = json.dumps(body).encode()
+        code, answer = ANSWERS[self.path]
+        data = json.dumps(answer).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -74,94 +69,63 @@ class CodexHookTest(unittest.TestCase):
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
         cls.down = f"http://127.0.0.1:{free_port()}/api/webhook/codex"
-        cls.cases = load_cases()
 
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
         cls.tmp.cleanup()
 
-    def run_hook(self, command, url, event="PreToolUse", legacy=0, token=None):
+    def run_hook(self, command, url, event="PreToolUse", token=None):
         script = (
             TEMPLATE.read_text()
             .replace("__TOKEN_FILE__", f"'{token or self.token}'")
             .replace("__URL__", f"'{url}'")
-            .replace("__LEGACY_SERVER__", str(legacy))
         )
-        path = Path(self.tmp.name) / f"hook-{legacy}.sh"
+        path = Path(self.tmp.name) / "hook.sh"
         path.write_text(script)
         payload = {
             "hook_event_name": event,
             "tool_name": "Bash",
             "tool_input": {"command": command},
-            "cwd": "/Users/someone/project",
         }
-        return subprocess.run(
+        started = time.monotonic()
+        result = subprocess.run(
             ["/bin/sh", str(path)],
             input=json.dumps(payload, ensure_ascii=False),
             capture_output=True,
             text=True,
-            timeout=40,
+            timeout=20,
         )
+        return result, time.monotonic() - started
 
-    def assert_blocked(self, result, command):
-        self.assertEqual(result.returncode, 2, f"{command!r} was not blocked")
-        self.assertIn("Notice blocked this command", result.stderr)
-        self.assertEqual(result.stdout, "")
+    def assert_passes(self, result, label):
+        self.assertEqual(result.returncode, 0, f"{label}: {result.stderr}")
+        self.assertEqual(result.stdout, "", f"{label}: Codex rejects JSON fields on PreToolUse")
 
-    def assert_allowed(self, result, command):
-        self.assertEqual(result.returncode, 0, f"{command!r}: {result.stderr}")
-        self.assertEqual(result.stdout, "", "Codex rejects continue/suppressOutput on PreToolUse")
+    def test_never_blocks_whatever_notice_answers(self):
+        for url in [self.down] + [self.base + path for path in ANSWERS]:
+            for event in EVENTS:
+                for command in COMMANDS:
+                    result, _ = self.run_hook(command, url, event=event)
+                    self.assert_passes(result, f"{url} {event} {command}")
 
-    def test_notice_down_blocks_only_destructive(self):
-        for critical, command in self.cases:
-            result = self.run_hook(command, self.down)
-            if critical:
-                self.assert_blocked(result, command)
-            else:
-                self.assert_allowed(result, command)
+    def test_forwards_payload_with_token(self):
+        FakeNotice.received.clear()
+        self.run_hook("rm -fr /", self.base + "/allow")
+        token, payload = FakeNotice.received[-1]
+        self.assertEqual(token, "test-token")
+        self.assertEqual(payload["tool_input"]["command"], "rm -fr /")
 
-    def test_unicode_space_variant_blocked(self):
-        for command in ("rm -rf /", "rm　-fr /"):
-            self.assert_blocked(self.run_hook(command, self.down), command)
+    def test_missing_token_passes_without_calling(self):
+        FakeNotice.received.clear()
+        result, _ = self.run_hook("rm -rf /", self.base + "/allow", token=Path(self.tmp.name) / "none")
+        self.assert_passes(result, "missing token")
+        self.assertEqual(FakeNotice.received, [])
 
-    def test_current_server_decides(self):
-        for _, command in self.cases:
-            self.assert_allowed(self.run_hook(command, self.base + "/allow"), command)
-
-    def test_legacy_server_cannot_approve_new_spellings(self):
-        for critical, command in self.cases:
-            result = self.run_hook(command, self.base + "/allow", legacy=1)
-            old_rule_hit = any(rule in " ".join(command.lower().split()) for rule in OLD_RULE)
-            if critical and not old_rule_hit:
-                self.assert_blocked(result, command)
-            else:
-                self.assert_allowed(result, command)
-
-    def test_rejection_blocks(self):
-        result = self.run_hook("rm -rf /", self.base + "/deny")
-        self.assert_blocked(result, "rm -rf /")
-        self.assertIn("Rejected in Notice", result.stderr)
-
-    def test_other_events_never_block_or_print(self):
-        for event in ("SessionStart", "PostToolUse", "PermissionRequest", "Stop"):
-            result = self.run_hook("rm -rf /", self.base + "/deny", event=event)
-            self.assertEqual((result.returncode, result.stdout), (0, ""), event)
-
-    def test_bad_answers_block_destructive(self):
-        for path in ("/unauthorized", "/error", "/failopen"):
-            self.assert_blocked(self.run_hook("rm -fr /", self.base + path), path)
-            self.assert_allowed(self.run_hook("ls -la /", self.base + path), path)
-
-    def test_missing_token_blocks_destructive(self):
-        missing = Path(self.tmp.name) / "no-token"
-        self.assert_blocked(self.run_hook("sudo  rm -r /x", self.down, token=missing), "sudo rm")
-        self.assert_allowed(self.run_hook("echo hi", self.down, token=missing), "echo hi")
-
-    def test_timeout_blocks(self):
-        started = time.monotonic()
-        self.assert_blocked(self.run_hook("echo hi", self.base + "/slow"), "slow answer")
-        self.assertLess(time.monotonic() - started, 30, "must finish inside Codex's 30 s hook timeout")
+    def test_slow_notice_does_not_stall_codex(self):
+        result, took = self.run_hook("echo hi", self.base + "/slow")
+        self.assert_passes(result, "slow")
+        self.assertLess(took, 5)
 
 
 if __name__ == "__main__":

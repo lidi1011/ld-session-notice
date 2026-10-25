@@ -52,9 +52,6 @@ async fn codex_webhook(
         );
     }
 
-    // Decided before handling, so a storage error cannot let a destructive
-    // command through.
-    let critical = is_critical_pre_tool_use(&payload);
     match handle_codex_payload(state.clone(), payload).await {
         Ok((response, should_sync_pet)) => {
             refresh_codex_usage_after_hook();
@@ -63,14 +60,6 @@ async fn codex_webhook(
             }
             (StatusCode::OK, Json(response))
         }
-        Err(error) if critical => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HookResponse {
-                should_continue: false,
-                stop_reason: Some(format!("Notice failed on a destructive command: {error}")),
-                suppress_output: Some(false),
-            }),
-        ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HookResponse {
@@ -80,17 +69,6 @@ async fn codex_webhook(
             }),
         ),
     }
-}
-
-fn is_critical_pre_tool_use(payload: &Value) -> bool {
-    let event_name = payload
-        .get("hook_event_name")
-        .or_else(|| payload.get("hookEventName"))
-        .and_then(Value::as_str);
-    event_name == Some("PreToolUse")
-        && extract_command(payload)
-            .map(|command| classify_command(&command).level == RiskLevel::Critical)
-            .unwrap_or(false)
 }
 
 fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
@@ -111,49 +89,32 @@ async fn handle_codex_payload(
         .and_then(Value::as_str)
         .unwrap_or("PostToolUse");
     let command = extract_command(&payload);
-    let project = payload
-        .get("project")
-        .or_else(|| payload.get("cwd"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
 
+    // Notice only records destructive commands; approving them is left to
+    // Codex itself, so the hook never waits on Notice.
     if event_name == "PreToolUse" {
         if let Some(command) = command.clone() {
             let risk = classify_command(&command);
             if matches!(risk.level, RiskLevel::Critical) {
-                let approval = storage::create_pending_approval(
-                    &state.pool,
-                    &redact(&command),
-                    project.as_deref(),
-                    "critical",
-                    &risk.rule,
-                    APPROVAL_TIMEOUT_SECS,
-                )
-                .await?;
                 let event = event_from_payload(
                     event_name,
                     &payload,
                     Some(command),
-                    NoticeEventType::UserConfirm,
+                    NoticeEventType::Warning,
                     NoticeLevel::Warning,
                     "High-risk command detected",
                 );
                 storage::insert_event(&state.pool, &event).await?;
                 send_feishu_if_enabled(&state, &event).await;
-                sync_pet_status(&state).await;
-                let response = wait_for_approval(&state, &approval.id).await?;
-                if response.should_continue {
-                    let resumed = event_from_payload(
-                        event_name,
-                        &payload,
-                        None,
-                        NoticeEventType::TaskStart,
-                        NoticeLevel::Info,
-                        "Codex task resumed",
-                    );
-                    storage::insert_event(&state.pool, &resumed).await?;
-                }
-                return Ok((response, true));
+                touch_session_activity(&state, event_name, &payload).await?;
+                return Ok((
+                    HookResponse {
+                        should_continue: true,
+                        stop_reason: None,
+                        suppress_output: Some(true),
+                    },
+                    true,
+                ));
             }
         }
     }
@@ -336,40 +297,6 @@ async fn send_feishu_if_enabled(state: &AppState, event: &NoticeEvent) {
     }
 }
 
-/// Shorter than the hook script's 28 s wait and Codex's 30 s hook timeout, so
-/// a late approval still reaches Codex.
-const APPROVAL_TIMEOUT_SECS: i64 = 25;
-
-async fn wait_for_approval(state: &AppState, id: &str) -> anyhow::Result<HookResponse> {
-    for _ in 0..APPROVAL_TIMEOUT_SECS * 4 {
-        if let Some(status) = storage::approval_status(&state.pool, id).await? {
-            match status.as_str() {
-                "approved" => {
-                    return Ok(HookResponse {
-                        should_continue: true,
-                        stop_reason: None,
-                        suppress_output: Some(true),
-                    });
-                }
-                "rejected" => {
-                    return Ok(HookResponse {
-                        should_continue: false,
-                        stop_reason: Some("Rejected in Notice".to_string()),
-                        suppress_output: Some(false),
-                    });
-                }
-                _ => {}
-            }
-        }
-        sleep(Duration::from_millis(250)).await;
-    }
-    storage::resolve_approval(&state.pool, id, "timed_out").await?;
-    Ok(HookResponse {
-        should_continue: false,
-        stop_reason: Some("Notice approval timed out".to_string()),
-        suppress_output: Some(false),
-    })
-}
 
 fn event_from_payload(
     event_name: &str,

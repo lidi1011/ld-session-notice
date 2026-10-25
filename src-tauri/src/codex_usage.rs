@@ -41,6 +41,9 @@ impl Drop for ScanGuard {
 }
 
 pub async fn latest() -> Option<CodexUsageStatus> {
+    if let Some(remote) = remote_usage().await {
+        return Some(remote);
+    }
     if let Some(value) = cached_value() {
         return value;
     }
@@ -68,6 +71,135 @@ pub async fn latest() -> Option<CodexUsageStatus> {
     }
 
     value
+}
+
+/// Usage straight from ChatGPT, signed in as Codex is (~/.codex/auth.json).
+/// Codex only writes rate limits into its transcripts when it talks to OpenAI
+/// directly; behind a gateway such as magpie they come back empty, so asking
+/// OpenAI is the one source that keeps working. This is the endpoint the Codex
+/// client itself polls; it is not a public API, so on any failure the caller
+/// falls back to the transcripts.
+const REMOTE_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const REMOTE_REFRESH: Duration = Duration::from_secs(60);
+
+static REMOTE: OnceLock<Mutex<Option<CachedUsage>>> = OnceLock::new();
+static REMOTE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct RemoteGuard;
+
+impl Drop for RemoteGuard {
+    fn drop(&mut self) {
+        REMOTE_RUNNING.store(false, Ordering::Release);
+    }
+}
+
+async fn remote_usage() -> Option<CodexUsageStatus> {
+    let cache = REMOTE.get_or_init(|| Mutex::new(None));
+    let cached = cache.lock().ok().and_then(|guard| guard.clone());
+    if let Some(cached) = &cached {
+        if cached.loaded_at.elapsed() <= REMOTE_REFRESH {
+            return cached.value.clone();
+        }
+    }
+    if REMOTE_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return cached.and_then(|cached| cached.value);
+    }
+    let _guard = RemoteGuard;
+
+    // Failures are cached too, so a signed-out Codex is not asked every poll.
+    let value = fetch_remote_usage().await.ok();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(CachedUsage {
+            loaded_at: Instant::now(),
+            value: value.clone(),
+        });
+    }
+    value
+}
+
+async fn fetch_remote_usage() -> anyhow::Result<CodexUsageStatus> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let auth = fs::read_to_string(home.join(".codex").join("auth.json"))?;
+    let tokens = serde_json::from_str::<CodexAuthFile>(&auth)?
+        .tokens
+        .ok_or_else(|| anyhow::anyhow!("Codex is not signed in with ChatGPT"))?;
+    let mut request = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?
+        .get(REMOTE_USAGE_URL)
+        .bearer_auth(tokens.access_token)
+        .header("User-Agent", "codex-cli")
+        .header("Accept", "application/json");
+    if let Some(account_id) = tokens.account_id {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+    let body = request.send().await?.error_for_status()?.text().await?;
+    parse_remote_usage(&body, Utc::now()).ok_or_else(|| anyhow::anyhow!("unexpected usage response"))
+}
+
+fn parse_remote_usage(body: &str, updated_at: DateTime<Utc>) -> Option<CodexUsageStatus> {
+    let usage: RemoteUsage = serde_json::from_str(body).ok()?;
+    let limits = usage.rate_limit?;
+    let primary = limits.primary_window.map(RemoteUsageWindow::into_window);
+    let secondary = limits.secondary_window.map(RemoteUsageWindow::into_window);
+    if primary.is_none() && secondary.is_none() {
+        return None;
+    }
+    Some(CodexUsageStatus {
+        limit_id: "codex".to_string(),
+        limit_name: None,
+        primary,
+        secondary,
+        plan_type: usage.plan_type,
+        rate_limit_reached_type: usage.rate_limit_reached_type,
+        updated_at,
+    })
+}
+
+#[derive(Deserialize)]
+struct CodexAuthFile {
+    tokens: Option<CodexAuthTokens>,
+}
+
+#[derive(Deserialize)]
+struct CodexAuthTokens {
+    access_token: String,
+    account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RemoteUsage {
+    plan_type: Option<String>,
+    rate_limit_reached_type: Option<String>,
+    rate_limit: Option<RemoteRateLimit>,
+}
+
+#[derive(Deserialize)]
+struct RemoteRateLimit {
+    primary_window: Option<RemoteUsageWindow>,
+    secondary_window: Option<RemoteUsageWindow>,
+}
+
+#[derive(Deserialize)]
+struct RemoteUsageWindow {
+    used_percent: f64,
+    limit_window_seconds: i64,
+    reset_at: Option<i64>,
+}
+
+impl RemoteUsageWindow {
+    fn into_window(self) -> CodexUsageWindow {
+        let used_percent = self.used_percent.clamp(0.0, 100.0);
+        CodexUsageWindow {
+            used_percent,
+            remaining_percent: 100.0 - used_percent,
+            window_minutes: self.limit_window_seconds / 60,
+            resets_at: self.reset_at.and_then(timestamp_from_seconds),
+        }
+    }
 }
 
 pub fn invalidate_cache() {
@@ -518,13 +650,33 @@ fn timestamp_from_seconds(seconds: i64) -> Option<DateTime<Utc>> {
 mod tests {
     use super::{
         cached_value, invalidate_cache, last_cached_value, parse_codexmate_bootstrap_active_usage,
-        parse_codexmate_quota_store, parse_usage_line, scan_latest_usage_for_home,
-        scan_transcript_usage_with_index, CachedUsage, UsageCandidates, CACHE,
+        parse_codexmate_quota_store, parse_remote_usage, parse_usage_line,
+        scan_latest_usage_for_home, scan_transcript_usage_with_index, CachedUsage,
+        UsageCandidates, CACHE,
     };
     use std::collections::HashMap;
     use std::fs;
     use std::io::Write;
     use std::time::Instant;
+
+    #[test]
+    fn parses_chatgpt_usage_response() {
+        let body = r#"{"plan_type":"plus","email":"x@example.com","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":27,"limit_window_seconds":18000,"reset_after_seconds":13140,"reset_at":1782770922},"secondary_window":{"used_percent":4,"limit_window_seconds":604800,"reset_after_seconds":566340,"reset_at":1783357722}},"rate_limit_reached_type":null,"credits":null}"#;
+        let status = parse_remote_usage(body, chrono::Utc::now()).unwrap();
+        let primary = status.primary.unwrap();
+        let secondary = status.secondary.unwrap();
+        assert_eq!(status.limit_id, "codex");
+        assert_eq!(status.plan_type.as_deref(), Some("plus"));
+        assert_eq!((primary.used_percent, primary.remaining_percent, primary.window_minutes), (27.0, 73.0, 300));
+        assert_eq!(secondary.window_minutes, 10080);
+        assert_eq!(primary.resets_at.unwrap().timestamp(), 1782770922);
+    }
+
+    #[test]
+    fn empty_chatgpt_usage_falls_back() {
+        assert!(parse_remote_usage(r#"{"plan_type":"plus","rate_limit":null}"#, chrono::Utc::now()).is_none());
+        assert!(parse_remote_usage("not json", chrono::Utc::now()).is_none());
+    }
 
     #[test]
     fn parses_rate_limit_payload() {

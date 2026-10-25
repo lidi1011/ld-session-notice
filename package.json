@@ -1,6 +1,6 @@
 {
   "name": "session-notice",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "macOS menu bar status and weekly quota for Codex and Claude Code.",
   "license": "MIT",
   "private": true,
