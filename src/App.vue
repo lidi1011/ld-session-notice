@@ -4,7 +4,6 @@ import { Menu } from "@tauri-apps/api/menu";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { DataTableColumns, MenuOption } from "naive-ui";
 import { darkTheme, dateEnUS, dateZhCN, enUS, zhCN } from "naive-ui";
-import { useApprovalStore } from "./stores/approvals";
 import { useChannelStore } from "./stores/channel";
 import { useDashboardStore } from "./stores/dashboard";
 import { useEventsStore } from "./stores/events";
@@ -18,7 +17,6 @@ import type {
   ClaudeUsageStatus,
   ProviderTrafficStatus,
   NoticeEvent,
-  PendingApproval,
   PetConfig,
   MochiVoiceConfig,
   TrafficWidgetManualState,
@@ -53,7 +51,6 @@ async function claudeAction(action: "preview" | "install" | "uninstall" | "login
   } catch (error) { claudeError.value = String(error); }
   finally { claudeBusy.value = false; }
 }
-const approvals = useApprovalStore();
 const traffic = useTrafficStore();
 const isWidget = new URLSearchParams(window.location.search).get("widget") === "traffic";
 let refreshTimer: number | undefined;
@@ -91,7 +88,6 @@ const copy = {
     events: "Events",
     channels: "Channels",
     providers: "Providers",
-    approvals: "Approvals",
     settings: "Settings",
     brandSubtitle: "Developer Notification Center",
     service: "Service",
@@ -110,13 +106,6 @@ const copy = {
     type: "Type",
     title: "Title",
     content: "Content",
-    created: "Created",
-    risk: "Risk",
-    rule: "Rule",
-    command: "Command",
-    action: "Action",
-    approve: "Approve",
-    reject: "Reject",
     feishu: "Feishu",
     feishuNotifications: "Feishu notifications",
     feishuEnabled: "Only approval reminders and successful completion are sent to Feishu",
@@ -213,7 +202,6 @@ const copy = {
     events: "事件",
     channels: "通知渠道",
     providers: "接入源",
-    approvals: "审批",
     settings: "设置",
     brandSubtitle: "开发者通知中心",
     service: "服务",
@@ -232,13 +220,6 @@ const copy = {
     type: "类型",
     title: "标题",
     content: "内容",
-    created: "创建时间",
-    risk: "风险",
-    rule: "规则",
-    command: "命令",
-    action: "操作",
-    approve: "批准",
-    reject: "拒绝",
     feishu: "飞书",
     feishuNotifications: "飞书通知",
     feishuEnabled: "开启后仅审批提醒和成功结束会发送到飞书",
@@ -346,7 +327,6 @@ const menuOptions = computed<MenuOption[]>(() => [
   { label: t("events"), key: "events" },
   { label: t("channels"), key: "channels" },
   { label: t("providers"), key: "providers" },
-  { label: t("approvals"), key: "approvals" },
   { label: t("settings"), key: "settings" },
 ]);
 
@@ -362,32 +342,6 @@ const eventColumns = computed<DataTableColumns<NoticeEvent>>(() => [
   { title: t("type"), key: "eventType", width: 150 },
   { title: t("title"), key: "title" },
   { title: t("content"), key: "content" },
-]);
-
-const approvalColumns = computed<DataTableColumns<PendingApproval>>(() => [
-  { title: t("created"), key: "createdAt", width: 170 },
-  { title: t("project"), key: "project", width: 130 },
-  { title: t("risk"), key: "riskLevel", width: 90 },
-  { title: t("rule"), key: "rule", width: 150 },
-  { title: t("command"), key: "command" },
-  {
-    title: t("action"),
-    key: "actions",
-    width: 190,
-    render: (row) =>
-      h("div", { class: "row-actions" }, [
-        h(
-          "button",
-          { class: "plain-button approve", onClick: () => approvals.resolve(row.id, "approved") },
-          t("approve"),
-        ),
-        h(
-          "button",
-          { class: "plain-button reject", onClick: () => approvals.resolve(row.id, "rejected") },
-          t("reject"),
-        ),
-      ]),
-  },
 ]);
 
 const currentTitle = computed(() => {
@@ -466,7 +420,6 @@ async function refreshAll(showFeedback = false) {
       hooks.load(),
       loadClaudeProvider(),
       hooks.previewInstall(),
-      approvals.load(),
       traffic.load(),
       loadAutostart(),
       loadPetConfig(),
@@ -486,7 +439,7 @@ async function refreshRuntimeStatus(showFeedback = false) {
   if (showFeedback) refreshFeedback.value = t("refreshing");
   try {
     await traffic.refreshRuntimeStatus();
-    await Promise.all([dashboard.load(), events.load(), approvals.load()]);
+    await Promise.all([dashboard.load(), events.load()]);
     if (showFeedback) refreshFeedback.value = t("statusRefreshDone");
   } catch (error) {
     console.error("Notice runtime status refresh failed", error);
@@ -710,7 +663,6 @@ watch(active, async (value) => {
     await hooks.load();
     await hooks.previewInstall();
   }
-  if (value === "approvals") await approvals.load();
   if (value === "dashboard") await dashboard.load();
   if (value === "settings") {
     await Promise.all([traffic.load(), loadAutostart(), loadPetConfig(), loadMochiVoiceConfig()]);
@@ -881,10 +833,6 @@ watch(active, async (value) => {
               </n-card>
             </section>
 
-            <section v-if="active === 'approvals'">
-              <n-data-table :columns="approvalColumns" :data="approvals.items" :bordered="false" />
-            </section>
-
             <section v-if="active === 'settings'">
               <n-card>
                 <template #header>{{ t("runtime") }}</template>
@@ -1044,11 +992,6 @@ watch(active, async (value) => {
 .level-error {
   background: #461f24;
   color: #ff9aa8;
-}
-
-.row-actions {
-  display: flex;
-  gap: 8px;
 }
 
 .saved-config {
@@ -1328,20 +1271,4 @@ watch(active, async (value) => {
   }
 }
 
-.plain-button {
-  min-width: 76px;
-  height: 30px;
-  border: 0;
-  border-radius: 6px;
-  color: white;
-  cursor: pointer;
-}
-
-.approve {
-  background: #1c7a4b;
-}
-
-.reject {
-  background: #9e2f3e;
-}
 </style>

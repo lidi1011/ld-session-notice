@@ -8,7 +8,6 @@ import type {
   HookStatus,
   NoticeEvent,
   Pagination,
-  PendingApproval,
   TrafficWidgetStatus,
   AppLocale,
   PetConfig,
@@ -44,9 +43,6 @@ export const api = {
   previewHookInstall: () => invoke<HookPreview>("preview_hook_install"),
   installHooks: () => invoke<HookStatus>("install_codex_hooks"),
   uninstallHooks: () => invoke<HookStatus>("uninstall_codex_hooks"),
-  approvals: () => invoke<PendingApproval[]>("list_pending_approvals"),
-  resolveApproval: (id: string, decision: "approved" | "rejected") =>
-    invoke<void>("resolve_approval", { id, decision }),
   trafficStatus: () => invoke<TrafficWidgetStatus>("get_traffic_widget_status"),
   setTrafficWidgetEnabled: (enabled: boolean) =>
     invoke<TrafficWidgetStatus>("set_traffic_widget_enabled", { enabled }),

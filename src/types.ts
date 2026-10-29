@@ -77,17 +77,6 @@ export interface HookPreview {
   preview: string;
 }
 
-export interface PendingApproval {
-  id: string;
-  command: string;
-  project?: string;
-  riskLevel: string;
-  rule: string;
-  status: "pending" | "approved" | "rejected" | "timed_out";
-  createdAt: string;
-  expiresAt: string;
-}
-
 export interface ProviderTrafficStatus {
   activeSessions: number;
   pendingApprovals: number;
